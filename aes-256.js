@@ -1,6 +1,7 @@
 const fs = require('fs');
 const readline = require('readline');
 const crypto = require('crypto');
+const { pipeline } = require('stream/promises');
 const ALGORITHM = 'aes-256-cbc';
 
 const format = (str,toLower=true) => (toLower) ? str.toString().trim().toLowerCase() : str.toString().trim();
@@ -16,6 +17,16 @@ function encrypt(_text, _password, _ivkeyword){
     return rs;
 }
 
+async function encryptFile(_origin, _target, _password, _ivkeyword) {
+    const key = shake256(sha512(_password), 16);
+    const iv = shake256(sha256(_ivkeyword), 8);
+    return await pipeline (
+        fs.createReadStream(_origin),
+        crypto.createCipheriv(ALGORITHM, key, iv),
+        fs.createWriteStream(_target)
+    );
+}
+
 function decrypt(_text, _password, _ivkeyword){
     const key = shake256(sha512(_password), 16);
     const iv = shake256(sha256(_ivkeyword), 8); 
@@ -24,20 +35,28 @@ function decrypt(_text, _password, _ivkeyword){
     return rs;
 }
 
+async function decryptFile(_origin, _target, _password, _ivkeyword) {
+    const key = shake256(sha512(_password), 16);
+    const iv = shake256(sha256(_ivkeyword), 8);
+    return await pipeline (
+        fs.createReadStream(_origin),
+        crypto.createDecipheriv(ALGORITHM, key, iv),
+        fs.createWriteStream(_target)
+    );
+}
+
+
 (async function Main () { // storage <mode:(encrypt|decrypt)> <file>
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     const question = (quest) => new Promise((resolve, reject) => rl.question(quest, (answer) => resolve(answer.trim().toUpperCase())));
     const args = process.argv.slice(2);
-    let mode, file, content, destinationFile, password, ivkeyword, readMode, writeMode;
+    let mode, file, content, destinationFile, password, ivkeyword, isFile;
     const help = `
     Usage: 
-        safe-storage <mode> <originFile> <destinationFile> [readMode-writeMode]
+        safe-storage <mode> <originFile> [--file]
 
         > Valid modes are [-e | --encrypt] and [-d | --decrypt];
-        > The <readMode-writeMode> parameter, controls the input and output types of the program.
-          The default is 'text-bin' for encryption (reads plaintext and saves binary encrypted content) and
-          'bin-text' for decryption (reads binary encrypted content, and saves plaintext decrypted content).
-          The options are: bin-bin, bin-text, text-bin, text-text.
+        > The [--file] parameter is used to encrypt or decrypt an entire binary (or plain) file, instead of plain data.
         > About encryption method and password:
             > The password you provide for encryption, is hashed with sha512,
               and then with shake256 (in 128-bit-long mode) before being used as a key.
@@ -50,7 +69,7 @@ function decrypt(_text, _password, _ivkeyword){
 
     try {
         // Getting CLI arguments
-            if (args.length < 3) { throw new Error('ERR:FAR'); }
+            if (args.length < 2) { throw new Error('ERR:FAR'); }
             else { 
                 mode = (() => {
                     if (['-d','--decrypt'].includes(format(args[0],true))) {
@@ -61,21 +80,9 @@ function decrypt(_text, _password, _ivkeyword){
                         throw new Error('ERR:IMS');
                     }
                 })();
-
                 file = format(args[1]); 
-                destinationFile = format(args[2]);
-                
-                [ readMode, writeMode ] = (() => {
-                    let a;
-                    if (!args[3]) {
-                        if (mode === 'encrypt') a = ['text','bin'];
-                        else a = ['bin','text'];
-                    } else {
-                        a = format(args[3]).split('-'); 
-                    }
-                    if (!['bin','text'].includes(a[0]) || !['bin','text'].includes(a[1])) throw new Error('ERR:IIO');
-                    return a;
-                })();
+                destinationFile = file + (mode === 'encrypt' ? '.aes' : '.dec');
+                isFile = args.map(x => format(x,true)).includes('--file');
             }
         
         // Capturing password
@@ -92,25 +99,31 @@ function decrypt(_text, _password, _ivkeyword){
 
         //Parsing input, password and arguments:
         if (mode === 'encrypt') {
-            // readMode makes no difference in encryption
-            try { content = fs.readFileSync(file); } catch (err) { throw new Error('ERR:IFR'); }
-            const encrypted = encrypt(content, password, ivkeyword); 
-            if (writeMode === 'text') {
-                fs.writeFileSync(destinationFile, encrypted);
+            let encrypted;
+            if (!isFile) {
+                try {
+                    content = fs.readFileSync(file, 'utf8');
+                    encrypted = encrypt(content, password, ivkeyword); 
+                    fs.writeFileSync(destinationFile, encrypted);
+                } catch (err) { throw new Error('ERR:IFR'); }
             } else {
-                fs.writeFileSync(destinationFile, Buffer.from(encrypted,'hex'));
+                try {
+                    await encryptFile(file, destinationFile, password, ivkeyword);
+                } catch (err) { throw new Error('ERR:IFR'); }
             }
-        
+
         } else if (mode === 'decrypt') {
-            try { 
-                if (readMode === 'text') content = fs.readFileSync(file, 'hex');
-                else content = fs.readFileSync(file);
-            } catch (err) { throw new Error('ERR:IFR'); }
-            const decrypted = decrypt(content, password, ivkeyword);
-            if (writeMode === 'text') { 
-                fs.writeFileSync(destinationFile, decrypted);
-            } else { 
-                fs.writeFileSync(destinationFile, Buffer.from(decrypted,'hex'));
+            let decrypted;
+            if (!isFile) {
+                try {
+                    content = fs.readFileSync(file, 'utf8');
+                    decrypted = decrypt(content, password, ivkeyword);
+                    fs.writeFileSync(destinationFile, decrypted);
+                } catch (err) { throw new Error('ERR:IFR'); }
+            } else {
+                try {
+                    await decryptFile(file, destinationFile, password, ivkeyword);
+                } catch (err) { throw new Error('ERR:IFR'); }
             }
         }
 
